@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>3D Scene Viewer with Custom Grass and Foliage</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style>
+			body { margin: 0; overflow: hidden; }
+			canvas { display: block; }
+		</style>
+	</head>
+	<body>
+
+		<!-- 📦 This import map tells the browser where to find the Three.js library and its addons. -->
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+                    "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/",
+                    "dat.gui": "https://unpkg.com/dat.gui@0.7.9/build/dat.gui.module.js"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			// --- Import necessary modules from Three.js ---
+			import * as THREE from 'three';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+            import { GUI } from 'dat.gui';
+            import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+            // --- ⚙️ 1. GLOBAL SETTINGS AND CONSTANTS ---
+            // =================================================================
+            // This object holds all the important URLs and names, making it easy to change them later.
+            const CONFIG = {
+                MODEL_URL: "https://dl.dropboxusercontent.com/scl/fi/3f9k0kq4m117iorqmadpx/Landscape-rvore-Teste-Copa-Separada-com-GramaTetraBill.glb?rlkey=kcbsfwg0eatywweflednwbl9m",
+                HDRI_URL: "https://dl.dropboxusercontent.com/scl/fi/c3iswf8iot8ep89jcup2t/golden_gate_hills_1k.hdr?rlkey=wlzj9qtcfxrwerezfnw038m0w",
+                GRASS_OBJECT_NAME: 'Landscape005_1',
+                CANOPY_OBJECT_PREFIX: 'NOVA_COPA' // Canopy means the leafy part of the tree
+            };
+
+			// --- 🎬 2. BASIC SCENE INITIALIZATION  ---
+			// =================================================================
+			const scene = new THREE.Scene(); // The container for all our 3D objects.
+            scene.environmentIntensity = 0.5; // Controls how much the HDRI affects the scene lighting.
+			const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000); // Our eyes in the 3D world.
+			camera.position.set(10, 7, -2); // Set the initial position of the camera.
+
+			const renderer = new THREE.WebGLRenderer({ antialias: true }); // The engine that draws everything on the screen.
+			renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Let there be shadows!
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Makes shadows look softer and more realistic.
+            renderer.toneMapping = THREE.ACESFilmicToneMapping; // A tone mapping algorithm that gives a cinematic look.
+			document.body.appendChild(renderer.domElement); // Add the renderer's canvas to our HTML page.
+
+			const controls = new OrbitControls(camera, renderer.domElement); // Allows us to control the camera with the mouse.
+			controls.enableDamping = true; // Creates a smooth, coasting effect for camera movement.
+			controls.target.set(0, 7, 0); // Where the camera will look at.
+
+			// --- ☀️ 3. ENVIRONMENT AND LIGHTING ---
+			// =================================================================
+			scene.background = new THREE.Color(0x87CEEB); // A nice sky blue color for the background.
+
+            // Load an HDRI (High Dynamic Range Image) for realistic reflections and ambient light.
+            const rgbeLoader = new RGBELoader();
+            rgbeLoader.load(CONFIG.HDRI_URL, (texture) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping;
+                scene.environment = texture; // Apply the HDRI to the scene's environment.
+                console.log("HDRI loaded and applied.");
+            });
+
+			const ambientLight = new THREE.AmbientLight(0xffffff, 1.5); // This light illuminates all objects in the scene equally.
+			scene.add(ambientLight);
+
+			// This light simulates the sun, casting directional shadows.
+			const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            directionalLight.castShadow = true;
+            // Define the area where shadows will be rendered (the shadow "camera").
+            directionalLight.shadow.camera.top = 100;
+            directionalLight.shadow.camera.bottom = -100;
+            directionalLight.shadow.camera.left = -100;
+            directionalLight.shadow.camera.right = 100;
+            directionalLight.shadow.mapSize.width = 2048; // Higher resolution for sharper shadows.
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.bias = -0.0002; // Helps prevent "shadow acne" artifacts.
+			scene.add(directionalLight);
+
+            // Settings to control the sun's position using angles.
+            const sunPosition = { elevation: 45, azimuth: 60 };
+            const sunDistance = 50;
+
+            // This function calculates the sun's 3D position from the angles.
+            function updateSunPosition() {
+                const elevationRad = THREE.MathUtils.degToRad(90 - sunPosition.elevation);
+                const azimuthRad = THREE.MathUtils.degToRad(sunPosition.azimuth);
+                directionalLight.position.setFromSphericalCoords(sunDistance, elevationRad, azimuthRad);
+            }
+            updateSunPosition(); // Set the initial sun position.
+
+            // --- 🎨 4. SHADER AND MATERIAL CONFIGURATIONS ---
+			// =================================================================
+
+            // 4.1. Global Shadow Control (for trunk, ground, etc.)
+            const globalShaderSettings = { shadowDarkness: 0.2 };
+            const globalShaderUniforms = { uShadowDarkness: { value: globalShaderSettings.shadowDarkness } };
+            const modifiedMaterials = []; // Keep track of materials we've already modified.
+
+            // 4.2. Tree Canopy (Leaves) Settings
+            const canopyMaterials = [];
+            const gradientSettings = {
+                gradientStart: -1.0, 
+                gradientEnd: 2.7,
+                litColor: new THREE.Color(0x21ff08), 
+                shadowColor: new THREE.Color(0x001d33),
+                highlightColor: new THREE.Color(0x8cff00), 
+                highlightStart: 0.5, 
+                highlightEnd: 1.8,
+                leafShadowDarkness: 0.2,
+            };
+            const windSettings = { strength: 0.05, frequency: 5.0, speed: 0.4 };
+            const guiProxy = { // Helper object for dat.gui color pickers.
+                litColor: gradientSettings.litColor.getHex(),
+                shadowColor: gradientSettings.shadowColor.getHex(),
+                highlightColor: gradientSettings.highlightColor.getHex()
+            };
+
+            // 4.3. Grass Settings
+            const grassParameters = { 
+                baseColor: '#009b00', 
+                tipColor: '#00ff4a', 
+                shadowDarkness: 0.3 };
+            const windUniforms = { // Variables (uniforms) passed to the grass wind shader.
+                uTime: { value: 0.0 }, 
+                uWindStrength: { value: 0.06 },
+                uWindSpeed: { value: 1.2 }, 
+                uWindDirection: { value: new THREE.Vector2(0.8, 0.6) }
+            };
+            const grassUniforms = { // Variables (uniforms) passed to the grass color shader.
+                uBaseColor: { value: new THREE.Color(grassParameters.baseColor) },
+                uTipColor: { value: new THREE.Color(grassParameters.tipColor) },
+                uShadowDarkness: { value: grassParameters.shadowDarkness }
+            };
+
+            // --- 🛠️ 5. MATERIAL SETUP FUNCTIONS ---
+            // =================================================================
+            // This function modifies standard materials (like the ground and trunk) to allow for artistic control over shadow darkness.
+            function modifyMaterialForShadows(material) {
+                if (material.userData.isModifiedForShadows) return; // Don't modify the same material twice.
+
+                // onBeforeCompile is a hook that lets us inject custom code into Three.js's built-in shaders.
+                material.onBeforeCompile = shader => {
+                    shader.uniforms.uShadowDarkness = globalShaderUniforms.uShadowDarkness;
+
+                    shader.fragmentShader = `
+                        uniform float uShadowDarkness; // Our custom variable for shadow darkness.
+                        ${shader.fragmentShader}
+                    `.replace(
+                        '#include <tonemapping_fragment>', // Find this part of the standard shader...
+                        `
+                        // --- HOW getShadow WORKS ---
+                        // getShadow is a built-in Three.js GLSL function that samples the shadow map.
+                        // It returns a value between 0.0 (fully in shadow) and 1.0 (fully lit).
+                        // We use this value to blend between a dark color and the normal lit color.
+                        float shadow = 1.0;
+                        #if ( NUM_DIR_LIGHT_SHADOWS > 0 )
+                            shadow = getShadow(
+                                directionalShadowMap[ 0 ],
+                                directionalLightShadows[ 0 ].shadowMapSize,
+                                directionalLightShadows[ 0 ].shadowBias,
+                                directionalLightShadows[ 0 ].shadowRadius,
+                                vDirectionalShadowCoord[ 0 ]
+                            );
+                        #endif
+
+                        vec3 colorAfterHDRI = gl_FragColor.rgb; // The color calculated by Three.js so far.
+                        
+                        // mix() blends between two values. Here, we blend between a darkened color and the original color
+                        // based on how much shadow there is.
+                        vec3 finalColor = mix(colorAfterHDRI * uShadowDarkness, colorAfterHDRI, shadow);
+                        gl_FragColor.rgb = finalColor;
+
+                        #include <tonemapping_fragment> // ...and insert our code right before it.
+                        `
+                    );
+                };
+                material.userData.isModifiedForShadows = true;
+                modifiedMaterials.push(material);
+            }
+
+            // This function creates the complete custom material for the grass.
+            function createCustomGrassMaterial() {
+                const material = new THREE.MeshLambertMaterial({
+                    side: THREE.DoubleSide, 
+                    transparent: true, 
+                    alphaTest: 0.5, 
+                    depthWrite: true,
+                });
+
+                material.onBeforeCompile = shader => {
+                    // Add all our custom grass and wind uniforms to the shader.
+                    Object.assign(shader.uniforms, grassUniforms, windUniforms);
+
+                    // --- VERTEX SHADER MODIFICATION (for wind) ---
+                    // The vertex shader's job is to position each vertex (corner) of the geometry.
+                    shader.vertexShader = `
+                        uniform float uTime;
+                        uniform float uWindStrength;
+                        uniform float uWindSpeed;
+                        uniform vec2 uWindDirection;
+                        varying vec2 vUv; // Pass UV coordinates to the fragment shader.
+                        ${shader.vertexShader}
+                    `
+                    .replace( '#include <begin_vertex>', `
+                        #include <begin_vertex>
+                        // swayFactor makes the base of the grass (uv.y=0) move less than the tip (uv.y=1).
+                        float swayFactor = 1.0 - uv.y;
+                        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                        // Create a simple, wave-like motion using sine functions based on time and world position.
+                        float windStrengthAtPoint = sin(worldPos.x * 0.5 + uTime * uWindSpeed) + sin(worldPos.z * 0.3 + uTime * uWindSpeed * 0.7);
+                        float displacement = windStrengthAtPoint * uWindStrength * swayFactor;
+                        // Move the vertex along the wind direction.
+                        transformed.xz += normalize(uWindDirection) * displacement;
+                    `)
+                    .replace('#include <uv_vertex>',`
+                        #include <uv_vertex>
+                        vUv = uv; // Assign the UV value so we can use it in the fragment shader.
+                    `);
+
+                    // --- FRAGMENT SHADER MODIFICATION (for color and shadow) ---
+                    // The fragment shader's job is to determine the color of each pixel.
+                    shader.fragmentShader = `
+                        uniform vec3 uBaseColor;
+                        uniform vec3 uTipColor;
+                        uniform float uShadowDarkness;
+                        varying vec2 vUv; // Receive the UVs from the vertex shader.
+                        ${shader.fragmentShader}
+                    `.replace('#include <dithering_fragment>',`
+                        vec4 textureColor = texture2D(map, vUv); // Get the color from the grass texture.
+                        float finalAlpha = step(alphaTest, textureColor.a); // Calculate transparency.
+                        if (finalAlpha < 0.5) discard; // If it's too transparent, don't draw this pixel.
+
+                        // Create a vertical gradient from the base color to the tip color.
+                        vec3 grassGradientColor = mix(uBaseColor, uTipColor, 1.0 - vUv.y);
+                        // Separate the lighting from the texture color.
+                        vec3 lighting = gl_FragColor.rgb / textureColor.rgb;
+                        // Apply the lighting to our new gradient color.
+                        vec3 litGrassColor = grassGradientColor * lighting;
+
+                        // Use the same getShadow technique as before to calculate shadows.
+                        float shadow = 1.0;
+                        #if ( NUM_DIR_LIGHT_SHADOWS > 0 )
+                            shadow = getShadow( 
+                                directionalShadowMap[ 0 ], 
+                                directionalLightShadows[ 0 ].shadowMapSize, 
+                                directionalLightShadows[ 0 ].shadowBias, 
+                                directionalLightShadows[ 0 ].shadowRadius, 
+                                vDirectionalShadowCoord[ 0 ] 
+                            );
+                        #endif
+
+                        // Blend between the lit color and a darkened version based on the shadow.
+                        vec3 finalColor = mix(litGrassColor * uShadowDarkness, litGrassColor, shadow);
+                        gl_FragColor = vec4(finalColor, finalAlpha);
+                        #include <dithering_fragment>
+                    `);
+                };
+                return material;
+            }
+            const customGrassMaterial = createCustomGrassMaterial(); // Create one instance of the grass material.
+
+            // This function creates the complete custom material for the tree leaves (canopy).
+            function createCustomCanopyMaterial(canopyObject) {
+                canopyObject.geometry.computeBoundingBox();
+                const boundingBox = canopyObject.geometry.boundingBox;
+                const treeCenter = new THREE.Vector3();
+                boundingBox.getCenter(treeCenter);
+                canopyObject.updateWorldMatrix(true, false);
+                treeCenter.applyMatrix4(canopyObject.matrixWorld); // Find the world-space center of the canopy.
+
+                const material = new THREE.MeshLambertMaterial({
+                    alphaMap: canopyObject.material.map, // Use the original texture for transparency.
+                    side: THREE.DoubleSide, 
+                    alphaTest: 0.5, 
+                    depthWrite: true,
+                });
+
+                material.onBeforeCompile = (shader) => {
+                    material.userData.shader = shader; // Store a reference to the compiled shader.
+                    // Add all our custom leaf and wind uniforms.
+                    Object.assign(shader.uniforms, {
+                        uLightDirection: { value: new THREE.Vector3() }, uTreeCenter: { value: treeCenter },
+                        uGradientStart: { value: gradientSettings.gradientStart }, uGradientEnd: { value: gradientSettings.gradientEnd },
+                        uLitColor: { value: gradientSettings.litColor }, uShadowColor: { value: gradientSettings.shadowColor },
+                        uHighlightColor: { value: gradientSettings.highlightColor }, uHighlightStart: { value: gradientSettings.highlightStart }, uHighlightEnd: { value: gradientSettings.highlightEnd },
+                        uLeafShadowDarkness: { value: gradientSettings.leafShadowDarkness },
+                        uTime: { value: 0.0 }, uWindStrength: { value: windSettings.strength },
+                        uWindFrequency: { value: windSettings.frequency }, uWindSpeed: { value: windSettings.speed }
+                    });
+
+                    // Perlin noise functions for more natural-looking wind.
+                    const noiseFunctions = `
+                        vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+                        vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+                        vec3 fade(vec3 t) {return t*t*t*(t*(t*6.0-15.0)+10.0);}
+                        float cnoise(vec3 P){
+                            vec3 Pi0 = floor(P); vec3 Pi1 = Pi0 + vec3(1.0); Pi0 = mod(Pi0, 289.0); Pi1 = mod(Pi1, 289.0);
+                            vec3 Pf0 = fract(P); vec3 Pf1 = Pf0 - vec3(1.0);
+                            vec4 ix = vec4(Pi0.x, Pi1.x, Pi0.x, Pi1.x); vec4 iy = vec4(Pi0.yy, Pi1.yy);
+                            vec4 iz0 = Pi0.zzzz; vec4 iz1 = Pi1.zzzz;
+                            vec4 ixy = permute(permute(ix) + iy); vec4 ixy0 = permute(ixy + iz0); vec4 ixy1 = permute(ixy + iz1);
+                            vec4 gx0 = ixy0 / 7.0; vec4 gy0 = fract(floor(gx0) / 7.0) - 0.5; gx0 = fract(gx0);
+                            vec4 gz0 = vec4(0.5) - abs(gx0) - abs(gy0); vec4 sz0 = step(gz0, vec4(0.0));
+                            gx0 -= sz0 * (step(0.0, gx0) - 0.5); gy0 -= sz0 * (step(0.0, gy0) - 0.5);
+                            vec4 gx1 = ixy1 / 7.0; vec4 gy1 = fract(floor(gx1) / 7.0) - 0.5; gx1 = fract(gx1);
+                            vec4 gz1 = vec4(0.5) - abs(gx1) - abs(gy1); vec4 sz1 = step(gz1, vec4(0.0));
+                            gx1 -= sz1 * (step(0.0, gx1) - 0.5); gy1 -= sz1 * (step(0.0, gy1) - 0.5);
+                            vec3 g000 = vec3(gx0.x,gy0.x,gz0.x); vec3 g100 = vec3(gx0.y,gy0.y,gz0.y);
+                            vec3 g010 = vec3(gx0.z,gy0.z,gz0.z); vec3 g110 = vec3(gx0.w,gy0.w,gz0.w);
+                            vec3 g001 = vec3(gx1.x,gy1.x,gz1.x); vec3 g101 = vec3(gx1.y,gy1.y,gz1.y);
+                            vec3 g011 = vec3(gx1.z,gy1.z,gz1.z); vec3 g111 = vec3(gx1.w,gy1.w,gz1.w);
+                            vec4 norm0 = taylorInvSqrt(vec4(dot(g000, g000), dot(g010, g010), dot(g100, g100), dot(g110, g110)));
+                            g000 *= norm0.x; g010 *= norm0.y; g100 *= norm0.z; g110 *= norm0.w;
+                            vec4 norm1 = taylorInvSqrt(vec4(dot(g001, g001), dot(g011, g011), dot(g101, g101), dot(g111, g111)));
+                            g001 *= norm1.x; g011 *= norm1.y; g101 *= norm1.z; g111 *= norm1.w;
+                            float n000 = dot(g000, Pf0); float n100 = dot(g100, vec3(Pf1.x, Pf0.yz));
+                            float n010 = dot(g010, vec3(Pf0.x, Pf1.y, Pf0.z)); float n110 = dot(g110, vec3(Pf1.xy, Pf0.z));
+                            float n001 = dot(g001, vec3(Pf0.xy, Pf1.z)); float n101 = dot(g101, vec3(Pf1.x, Pf0.y, Pf1.z));
+                            float n011 = dot(g011, vec3(Pf0.x, Pf1.yz)); float n111 = dot(g111, Pf1);
+                            vec3 fade_xyz = fade(Pf0); vec4 n_z = mix(vec4(n000, n100, n010, n110), vec4(n001, n101, n011, n111), fade_xyz.z);
+                            vec2 n_yz = mix(n_z.xy, n_z.zw, fade_xyz.y); float n_xyz = mix(n_yz.x, n_yz.y, fade_xyz.x);
+                            return 2.2 * n_xyz;
+                        }`;
+
+                    // --- VERTEX SHADER MODIFICATION (for wind) ---
+                    shader.vertexShader = `
+                        varying vec3 vWorldPosition; // Pass the world position to the fragment shader.
+                        uniform float uTime;
+                        uniform float uWindStrength;
+                        uniform float uWindFrequency;
+                        uniform float uWindSpeed;
+                        ${noiseFunctions}
+                        ${shader.vertexShader}
+                    `.replace('#include <begin_vertex>', `
+                        #include <begin_vertex>
+                        float time = uTime * uWindSpeed;
+                        // Use Perlin noise to create a more organic, gusting wind effect.
+                        float noise = cnoise(vec3(position.x * uWindFrequency, position.y * uWindFrequency, time));
+                        vec3 windDirection = vec3(1.0, 0.0, 1.0); // Simple diagonal wind direction.
+                        // The higher up the vertex is, the more it's affected by the wind.
+                        float displacement = noise * uWindStrength * (position.y / 8.0);
+                        transformed.xyz += normalize(windDirection) * displacement;
+                        // Calculate the final world position after displacement.
+                        vWorldPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;
+                    `);
+                    
+                    // --- FRAGMENT SHADER MODIFICATION (for volumetric color and shadow) ---
+                    shader.fragmentShader = `
+                        varying vec3 vWorldPosition;
+                        uniform vec3 uLightDirection; uniform vec3 uTreeCenter;
+                        uniform float uGradientStart; uniform float uGradientEnd;
+                        uniform vec3 uLitColor; uniform vec3 uShadowColor;
+                        uniform vec3 uHighlightColor; uniform float uHighlightStart; uniform float uHighlightEnd;
+                        uniform float uLeafShadowDarkness;
+                        ${shader.fragmentShader}
+                    `.replace('#include <color_fragment>',`
+                        #include <color_fragment>
+                        // First, calculate the cast shadow value, just like in the other materials.
+                        float shadow = 1.0;
+                        #if ( NUM_DIR_LIGHT_SHADOWS > 0 )
+                            shadow = getShadow( 
+                                directionalShadowMap[ 0 ], 
+                                directionalLightShadows[ 0 ].shadowMapSize, 
+                                directionalLightShadows[ 0 ].shadowBias, 
+                                directionalLightShadows[ 0 ].shadowRadius, 
+                                vDirectionalShadowCoord[ 0 ] 
+                            );
+                        #endif
+
+                        // --- HOW THE VOLUMETRIC GRADIENT WORKS ---
+                        // 1. Get a direction vector from the center of the tree to the surface of the leaf.
+                        vec3 fromCenterToSurface = normalize(vWorldPosition - uTreeCenter);
+                        // 2. Use the dot product to see how aligned this vector is with the sun's direction.
+                        //    Result is -1 (facing away from light) to +1 (facing towards light).
+                        float lightAlignment = dot(fromCenterToSurface, uLightDirection);
+                        // 3. Use smoothstep to create a smooth gradient from the shadow color to the lit color based on the alignment.
+                        float baseGradientFactor = smoothstep(uGradientStart, uGradientEnd, lightAlignment);
+                        vec3 baseColor = mix(uShadowColor, uLitColor, baseGradientFactor);
+                        // 4. Add another, brighter highlight on top.
+                        float highlightFactor = smoothstep(uHighlightStart, uHighlightEnd, lightAlignment);
+                        vec3 gradientColor = mix(baseColor, uHighlightColor, highlightFactor);
+
+                        // Finally, apply the cast shadow to our custom gradient color.
+                        vec3 finalShadowedColor = mix(gradientColor * uLeafShadowDarkness, gradientColor, shadow);
+                        diffuseColor.rgb = finalShadowedColor;
+                    `).replace('#include <normal_fragment_begin>', `
+                        #include <normal_fragment_begin>
+                        // --- FOLIAGE SHADING TRICK ---
+                        // This forces every leaf to face the camera. It makes the foliage look fuller
+                        // and prevents the flat planes from looking dark and thin at sharp angles.
+                        vec3 worldUp = vec3(0.0, 1.0, 0.0);
+                        vec3 viewUp = normalize(mat3(viewMatrix) * worldUp);
+                        normal = viewUp;
+                    `);
+                };
+                return material;
+            }
+
+            // --- 🎛️ 6. GRAPHICAL USER INTERFACE (dat.gui) ---
+            // =================================================================
+            const gui = new GUI();
+            
+            const lightControlsFolder = gui.addFolder('Lighting Controls');
+            lightControlsFolder.add(ambientLight, 'intensity', 0, 5, 0.01).name('Ambient Light');
+            lightControlsFolder.add(directionalLight, 'intensity', 0, 5, 0.05).name('Directional Light');
+            lightControlsFolder.add(scene, 'environmentIntensity', 0, 5, 0.01).name('HDRI Intensity');            
+            lightControlsFolder.open();
+
+            const grassFolder = gui.addFolder('Grass Controls');
+            grassFolder.addColor(grassParameters, 'baseColor').name('Base Color').onChange(value => {
+                grassUniforms.uBaseColor.value.set(value);
+            });
+            grassFolder.addColor(grassParameters, 'tipColor').name('Tip Color').onChange(value => {
+                grassUniforms.uTipColor.value.set(value);
+            });
+            grassFolder.add(grassUniforms.uShadowDarkness, 'value', 0.0, 1.0).name('Shadow Intensity');
+            grassFolder.open();
+            
+            const lightFolder = gui.addFolder('Sun & Shadow');
+            lightFolder.add(sunPosition, 'elevation', 0, 90, 1).name('Sun Elevation').onChange(updateSunPosition);
+            lightFolder.add(sunPosition, 'azimuth', 0, 360, 1).name('Sun Azimuth').onChange(updateSunPosition);
+            lightFolder.add(directionalLight.shadow, 'bias', -0.01, 0.01, 0.0001).name('Shadow Bias');
+            lightFolder.open();
+            
+            const windFolder = gui.addFolder('Grass Wind');
+            windFolder.add(windUniforms.uWindStrength, 'value', 0, 0.5, 0.01).name('Strength');
+            windFolder.add(windUniforms.uWindSpeed, 'value', 0, 5, 0.01).name('Speed');
+            windFolder.add(windUniforms.uWindDirection.value, 'x', -1, 1, 0.01).name('Direction X');
+            windFolder.add(windUniforms.uWindDirection.value, 'y', -1, 1, 0.01).name('Direction Z');
+            windFolder.open();
+
+            // Helper functions to update all leaf materials at once.
+            const updateAllMaterials = (uniformName, value) => { canopyMaterials.forEach(m => m.userData.shader && (m.userData.shader.uniforms[uniformName].value = value)); };
+            const updateAllColors = (uniformName, colorObject) => { canopyMaterials.forEach(m => m.userData.shader && m.userData.shader.uniforms[uniformName].value.copy(colorObject)); };
+
+            const leavesFolder = gui.addFolder('Volumetric Gradient (Leaves)');
+            leavesFolder.add(gradientSettings, 'gradientStart', -1, 5, 0.01).name('Start').onChange(v => updateAllMaterials('uGradientStart', v));
+            leavesFolder.add(gradientSettings, 'gradientEnd', -1, 5, 0.01).name('End').onChange(v => updateAllMaterials('uGradientEnd', v));
+            leavesFolder.addColor(guiProxy, 'shadowColor').name('Shadow Color').onChange(() => { gradientSettings.shadowColor.set(guiProxy.shadowColor); updateAllColors('uShadowColor', gradientSettings.shadowColor); });
+            leavesFolder.addColor(guiProxy, 'litColor').name('Lit Color').onChange(() => { gradientSettings.litColor.set(guiProxy.litColor); updateAllColors('uLitColor', gradientSettings.litColor); });
+            leavesFolder.add(gradientSettings, 'highlightStart', -1, 5, 0.01).name('Highlight Start').onChange(v => updateAllMaterials('uHighlightStart', v));
+            leavesFolder.add(gradientSettings, 'highlightEnd', -1, 5, 0.01).name('Highlight End').onChange(v => updateAllMaterials('uHighlightEnd', v));
+            leavesFolder.addColor(guiProxy, 'highlightColor').name('Highlight Color').onChange(() => { gradientSettings.highlightColor.set(guiProxy.highlightColor); updateAllColors('uHighlightColor', gradientSettings.highlightColor); });
+            leavesFolder.add(gradientSettings, 'leafShadowDarkness', 0, 1, 0.01).name('Shadow Int.').onChange(v => updateAllMaterials('uLeafShadowDarkness', v));
+            leavesFolder.open();
+
+            const leavesWindFolder = gui.addFolder('Leaves Wind');
+            leavesWindFolder.add(windSettings, 'strength', 0, 1, 0.01).name('Strength').onChange(v => updateAllMaterials('uWindStrength', v));
+            leavesWindFolder.add(windSettings, 'frequency', 0, 5, 0.01).name('Frequency').onChange(v => updateAllMaterials('uWindFrequency', v));
+            leavesWindFolder.add(windSettings, 'speed', 0, 5, 0.1).name('Speed').onChange(v => updateAllMaterials('uWindSpeed', v));
+            leavesWindFolder.open();
+
+            const sceneFolder = gui.addFolder('Global Scene Controls');
+            sceneFolder.add(globalShaderSettings, 'shadowDarkness', 0.0, 1.0).name('Shadow Intensity').onChange(value => {
+                globalShaderUniforms.uShadowDarkness.value = value;
+            });
+            sceneFolder.open();
+
+			// --- 🌳 7. LOAD THE 3D MODEL (GLB) ---
+			// =================================================================
+			const loader = new GLTFLoader();
+			loader.load(CONFIG.MODEL_URL, function (gltf) {
+                const model = gltf.scene;
+                // Traverse goes through every object in the loaded model.
+                model.traverse(function (object) {
+                    if (!object.isMesh) return; // Skip non-mesh objects (like lights or cameras in the file).
+
+                    // Enable all objects to cast and receive shadows.
+                    object.castShadow = true;
+                    object.receiveShadow = true;
+
+                    // This fixes an issue where the back faces of objects might not be rendered.
+                    if (object.material) {
+                        if (Array.isArray(object.material)) {
+                            object.material.forEach(mat => mat.side = THREE.FrontSide);
+                        } else {
+                            object.material.side = THREE.FrontSide;
+                        }
+                    }
+
+                    // Apply the correct custom material based on the object's name in the 3D file.
+                    if (object.name === CONFIG.GRASS_OBJECT_NAME) {
+                        customGrassMaterial.map = object.material.map; // Reuse the original grass texture.
+                        object.material = customGrassMaterial;
+                    }
+                    else if (object.name.startsWith(CONFIG.CANOPY_OBJECT_PREFIX)) {
+                        const individualMaterial = createCustomCanopyMaterial(object);
+                        object.material = individualMaterial;
+                        canopyMaterials.push(individualMaterial);
+                    }
+                    else {
+                        // For all other objects (like the trunk and ground), just modify their existing material.
+                        if (object.material) {
+                            if (Array.isArray(object.material)) {
+                                object.material.forEach(modifyMaterialForShadows);
+                            } else {
+                                modifyMaterialForShadows(object.material);
+                            }
+                        }
+                    }
+                });
+                scene.add(model);
+                console.log("Model loaded successfully!");
+            },
+            xhr => console.log((xhr.loaded / xhr.total * 100) + '% loaded'), // Progress callback
+            error => console.error('An error occurred while loading the model.', error) // Error callback
+            );
+
+			// --- 🔄 8. ANIMATION LOOP AND RESPONSIVENESS ---
+			// =================================================================
+            const clock = new THREE.Clock();
+            function animate() {
+                const elapsedTime = clock.getElapsedTime(); // Get the total time passed since start.
+
+                // Update the time uniform for the grass wind effect.
+                windUniforms.uTime.value = elapsedTime; 
+
+                // Update uniforms for all the leaf materials.
+                if (canopyMaterials.length > 0) {
+                    const lightDir = directionalLight.position.clone().normalize();
+                    for (const material of canopyMaterials) {
+                        if (material.userData.shader) {
+                            // Update the light direction in case the sun moves.
+                            material.userData.shader.uniforms.uLightDirection.value.copy(lightDir);
+                            // Update the time for the leaf wind effect.
+                            material.userData.shader.uniforms.uTime.value = elapsedTime;
+                        }
+                    }
+                }
+                requestAnimationFrame(animate); // Loop the animation.
+                controls.update(); // Update camera controls.
+                renderer.render(scene, camera); // Render the scene.
+            }
+            animate();
+
+			// Handle window resizing to keep the scene looking good.
+			window.addEventListener('resize', () => {
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize(window.innerWidth, window.innerHeight);
+			});
+
+		</script>
+	</body>
+</html>
